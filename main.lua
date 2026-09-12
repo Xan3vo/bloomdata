@@ -54,6 +54,48 @@ local startTime = os.time()
 local bloomStats = {total_spawned = 0, total_destroyed = 0, field_assignments = 0, no_field_assigned = 0}
 local searchFilter = ""
 
+-- Spawn history: every spawn event timestamped, so we can compute rolling rates
+-- (spawns in the last 10 min / 1 hr / etc) per field. Pruned periodically so it
+-- never grows unbounded during long sessions.
+local SPAWN_HISTORY_RETENTION = 3600 * 6 -- keep 6 hours of history max
+local spawnHistory = {} -- { {time = os.time(), field = "Mushroom Field" or "NO_FIELD"}, ... }
+
+local function recordSpawn(fieldName)
+    table.insert(spawnHistory, {time = os.time(), field = fieldName or "NO_FIELD"})
+end
+
+local function pruneSpawnHistory()
+    local cutoff = os.time() - SPAWN_HISTORY_RETENTION
+    local i = 1
+    while i <= #spawnHistory and spawnHistory[i].time < cutoff do
+        i = i + 1
+    end
+    if i > 1 then
+        local trimmed = table.create and table.create(#spawnHistory - i + 1) or {}
+        for j = i, #spawnHistory do trimmed[#trimmed + 1] = spawnHistory[j] end
+        spawnHistory = trimmed
+    end
+end
+
+-- Counts spawns per field within the last `windowSeconds`. Returns {fieldName = count, ...}
+-- plus a "NO_FIELD" bucket for unmatched spawns.
+local function countSpawnsInWindow(windowSeconds)
+    local cutoff = os.time() - windowSeconds
+    local counts = {}
+    for i = #spawnHistory, 1, -1 do
+        local entry = spawnHistory[i]
+        if entry.time < cutoff then break end -- history is time-ordered, safe to stop early
+        counts[entry.field] = (counts[entry.field] or 0) + 1
+    end
+    return counts
+end
+
+-- Projects an hourly rate from a shorter window (e.g. 10 min of data -> spawns/hr estimate)
+local function projectHourlyRate(count, windowSeconds)
+    if windowSeconds <= 0 then return 0 end
+    return count * (3600 / windowSeconds)
+end
+
 -- Forward declarations (assigned later; referenced by UI callbacks created earlier in the file)
 local sendDiscordReport
 local refreshStatusLabel
@@ -713,6 +755,43 @@ local function buildFieldBreakdownText()
     return table.concat(lines, "\n")
 end
 
+-- Builds a spawn-rate table: per field, how many spawned in the last 10 min and last 1 hr.
+-- Sorted by 1-hour count descending. Includes a "(No Field)" row for unmatched spawns.
+local function buildSpawnRateText()
+    local counts10m = countSpawnsInWindow(600)   -- 10 minutes
+    local counts1h = countSpawnsInWindow(3600)   -- 1 hour
+
+    local names = {}
+    local seen = {}
+    for _, data in pairs(fieldCache) do
+        if not seen[data.instance.Name] then
+            seen[data.instance.Name] = true
+            table.insert(names, data.instance.Name)
+        end
+    end
+    if counts10m.NO_FIELD or counts1h.NO_FIELD then table.insert(names, "(No Field)") end
+
+    local rows = {}
+    for _, name in ipairs(names) do
+        local key = name == "(No Field)" and "NO_FIELD" or name
+        local c10 = counts10m[key] or 0
+        local c1h = counts1h[key] or 0
+        if c10 > 0 or c1h > 0 then
+            table.insert(rows, {name = name, c10 = c10, c1h = c1h})
+        end
+    end
+    table.sort(rows, function(a, b) return a.c1h > b.c1h end)
+
+    if #rows == 0 then return "No spawns recorded yet" end
+
+    local lines = {string.format("%-18s %5s %5s", "FIELD", "10m", "1h")}
+    for i, row in ipairs(rows) do
+        if i > 12 then break end
+        table.insert(lines, string.format("%-18s %5d %5d", row.name:sub(1, 18), row.c10, row.c1h))
+    end
+    return table.concat(lines, "\n")
+end
+
 refreshStatusLabel = function()
     if DISCORD_ENABLED then
         statusLabel.Text = "Discord Webhook"
@@ -763,7 +842,8 @@ local function buildReportPayload()
         fields = {
             { name = "📈 Totals", value = string.format("```yaml\nSpawned:   %d\nDestroyed: %d\nPop Rate:  %d%%\n```", bloomStats.total_spawned, bloomStats.total_destroyed, destroyRate), inline = true },
             { name = "🌿 Live Status", value = string.format("```yaml\nActive:    %d\nIn Field:  %d\nNo Field:  %d\n```", active, fieldBlooms, noFieldBlooms), inline = true },
-            { name = "🗺️ Field Breakdown (top 10)", value = "```\n" .. buildFieldBreakdownText() .. "\n```", inline = false },
+            { name = "🗺️ Currently Active (top 10)", value = "```\n" .. buildFieldBreakdownText() .. "\n```", inline = false },
+            { name = "⏱️ Spawn Rate by Field (10m / 1h)", value = "```\n" .. buildSpawnRateText() .. "\n```", inline = false },
         },
         footer = { text = string.format("Bloom Tracker v2.0 • report #%d • every %ds", discordState.totalSent + 1, currentInterval) },
         timestamp = DateTime.now():ToIsoDate(),
@@ -891,9 +971,11 @@ local function trackBloom(bloom)
     if field then
         bloomStats.field_assignments = bloomStats.field_assignments + 1
         fieldCounts[fieldName] = (fieldCounts[fieldName] or 0) + 1
+        recordSpawn(fieldName)
         if DEBUG_MODE then print("[BloomTracker] ✓ " .. bloom.Name .. " → " .. fieldName .. " @ " .. fmtVec(pos)) end
     else
         bloomStats.no_field_assigned = bloomStats.no_field_assigned + 1
+        recordSpawn(nil)
         if DEBUG_MODE then print("[BloomTracker] ✗ " .. bloom.Name .. " @ " .. fmtVec(pos) .. " — no field match") end
     end
 
@@ -974,6 +1056,7 @@ local function init()
     poppable.DescendantAdded:Connect(onDescendantAdded)
 
     local lastStatusRefresh = 0
+    local lastPrune = 0
     RunService.Heartbeat:Connect(function()
         updateBloomPositions()
         sendDiscordReport()
@@ -982,6 +1065,10 @@ local function init()
         if now - lastStatusRefresh >= 1 then -- refresh "Xs ago" text once a second
             lastStatusRefresh = now
             refreshStatusLabel()
+        end
+        if now - lastPrune >= 60 then -- prune old spawn history once a minute
+            lastPrune = now
+            pruneSpawnHistory()
         end
     end)
 
