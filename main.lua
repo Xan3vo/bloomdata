@@ -25,6 +25,19 @@ local DEBUG_MODE = true
 
 pcall(function() HttpService:SetHttpEnabled(true) end)
 
+-- Executor HTTP detection: HttpService:PostAsync is blocked ("dangerous call") for
+-- non-Roblox scripts even under executors. Executors instead expose their own request
+-- function (request / http_request / syn.request / etc) that bypasses this restriction.
+local executorRequest = (syn and syn.request)
+    or (http and http.request)
+    or request
+    or http_request
+    or fluxus and fluxus.request
+    or nil
+
+local HTTP_METHOD = executorRequest and "executor" or "roblox"
+print("[BloomTracker] HTTP method: " .. HTTP_METHOD .. (executorRequest and " (using executor's request function)" or " (using HttpService:PostAsync - may be blocked!)"))
+
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
@@ -762,6 +775,35 @@ local function buildReportPayload()
     }
 end
 
+-- Performs the actual HTTP POST, preferring the executor's request function
+-- (bypasses Roblox's "dangerous call" block on HttpService:PostAsync).
+local function postJson(url, encoded)
+    if executorRequest then
+        local ok, response = pcall(function()
+            return executorRequest({
+                Url = url,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = encoded,
+            })
+        end)
+        if not ok then return false, response end
+        -- Discord returns 204/200 on success; treat anything else as failure
+        local status = response and (response.StatusCode or response.Status)
+        if status and (status == 200 or status == 204) then
+            return true
+        elseif status then
+            return false, "HTTP " .. tostring(status) .. (response.Body and (": " .. tostring(response.Body)) or "")
+        end
+        return true -- some executors return nothing on success
+    else
+        local ok, err = pcall(function()
+            HttpService:PostAsync(url, encoded, Enum.HttpContentType.ApplicationJson)
+        end)
+        return ok, err
+    end
+end
+
 -- Sends one payload with automatic retry + exponential backoff.
 -- Returns true/false via callback so the caller knows the final outcome.
 local function sendToDiscordWithRetry(payload, onDone)
@@ -772,9 +814,7 @@ local function sendToDiscordWithRetry(payload, onDone)
 
         while attempt <= DISCORD_MAX_RETRIES do
             attempt = attempt + 1
-            local success, errOrResult = pcall(function()
-                HttpService:PostAsync(DISCORD_WEBHOOK_URL, encoded, Enum.HttpContentType.ApplicationJson)
-            end)
+            local success, errOrResult = postJson(DISCORD_WEBHOOK_URL, encoded)
 
             if success then
                 if onDone then onDone(true, attempt) end
