@@ -140,6 +140,7 @@ local function cacheFieldData()
 
     print("[BloomTracker] Caching fields...")
     for _, field in ipairs(fieldsFolder:GetChildren()) do
+        -- Handle Model objects
         if field:IsA("Model") then
             local ok, boxCFrame, size = pcall(function() return field:GetBoundingBox() end)
             if ok and boxCFrame and size then
@@ -152,6 +153,12 @@ local function cacheFieldData()
                     print("[BloomTracker] ✓ Cached field '" .. field.Name .. "' at " .. tostring(pivotPos))
                 end
             end
+        -- Handle Part objects (fields as parts)
+        elseif field:IsA("BasePart") then
+            local fieldCFrame = field.CFrame
+            local fieldSize = field.Size
+            fieldCache[field.Name] = {field = field, boxCFrame = fieldCFrame, size = fieldSize, useBoundingBox = true}
+            print("[BloomTracker] ✓ Cached field '" .. field.Name .. "' (Part) at " .. tostring(fieldCFrame.Position))
         end
     end
     print("[BloomTracker] Total fields cached: " .. tostring(#fieldCache))
