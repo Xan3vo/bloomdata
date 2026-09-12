@@ -19,6 +19,7 @@ local FIELDS_FOLDER_NAME = "Fields"
 local POSITION_CHECK_THRESHOLD = 2
 local CHECK_INTERVAL = 0.5
 local FIELD_DETECTION_RADIUS = 100 -- Larger radius for better detection
+local DEBUG_MODE = true -- Set to false to disable debug logging
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -262,10 +263,28 @@ end
 local function getFieldForPosition(pos)
     if not pos then return nil end
 
+    -- Check bounding box collision (for Part-based fields)
     for _, data in pairs(fieldCache) do
         if data.useBoundingBox and data.boxCFrame and data.size then
             local rel = (data.boxCFrame:Inverse() * CFrame.new(pos)).Position
-            if math.abs(rel.X) <= data.size.X/2 and math.abs(rel.Y) <= data.size.Y/2 and math.abs(rel.Z) <= data.size.Z/2 then
+            -- Add padding/tolerance to bounding box check
+            local padX = data.size.X/2 + 10
+            local padY = data.size.Y/2 + 10
+            local padZ = data.size.Z/2 + 10
+            if math.abs(rel.X) <= padX and math.abs(rel.Y) <= padY and math.abs(rel.Z) <= padZ then
+                return data.field
+            end
+        end
+    end
+
+    -- Fallback to distance check with larger radius
+    for _, data in pairs(fieldCache) do
+        if data.useBoundingBox and data.boxCFrame and data.size then
+            local fieldPos = data.boxCFrame.Position
+            local distance = (pos - fieldPos).Magnitude
+            -- Use field size to calculate dynamic radius
+            local fieldRadius = math.max(data.size.X, data.size.Y, data.size.Z) / 2 + 30
+            if distance < fieldRadius then
                 return data.field
             end
         end
@@ -323,13 +342,29 @@ local function trackBloom(bloom)
 
     if field then
         bloomStats.field_assignments = bloomStats.field_assignments + 1
-        print("[BloomTracker] ✓ Bloom '" .. bloom.Name .. "' assigned to field '" .. field.Name .. "' at position " .. tostring(pos))
+        if DEBUG_MODE then
+            print("[BloomTracker] ✓ Bloom '" .. bloom.Name .. "' → " .. field.Name .. " at " .. string.format("(%.0f, %.0f, %.0f)", pos.X, pos.Y, pos.Z))
+        end
     else
         bloomStats.no_field_assigned = bloomStats.no_field_assigned + 1
-        local fieldNames = ""
-        for name, _ in pairs(fieldCache) do fieldNames = fieldNames .. (fieldNames == "" and name or ", " .. name) end
-        print("[BloomTracker] ✗ Bloom '" .. bloom.Name .. "' at position " .. tostring(pos) .. " - NO FIELD MATCH")
-        print("[BloomTracker]   Available fields: " .. (fieldNames ~= "" and fieldNames or "NONE"))
+        if DEBUG_MODE then
+            print("[BloomTracker] ✗ Bloom at " .. string.format("(%.0f, %.0f, %.0f)", pos.X, pos.Y, pos.Z) .. " - checking nearest fields...")
+            -- Find and show nearest field for debugging
+            local nearestDist = math.huge
+            local nearestField = nil
+            for name, data in pairs(fieldCache) do
+                if data.boxCFrame then
+                    local dist = (pos - data.boxCFrame.Position).Magnitude
+                    if dist < nearestDist then
+                        nearestDist = dist
+                        nearestField = name
+                    end
+                end
+            end
+            if nearestField then
+                print("[BloomTracker]   Nearest: " .. nearestField .. " (" .. string.format("%.1f", nearestDist) .. " studs away)")
+            end
+        end
     end
 
     local uiLabel = createBloomLabel(bloom, field)
