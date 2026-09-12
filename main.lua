@@ -4,6 +4,12 @@
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+
+-- Discord Webhook Configuration
+local DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1548446623300849736/pyVshktLNmolGJt5eR1MyyqwUunDGcvRM5G53CNOJKLqo9_a7Wl7KbnQ4-aXSX8sm_Sf"
+local DISCORD_ENABLED = true
+local DISCORD_REPORT_INTERVAL = 60 -- Report every 60 seconds
 
 local POPPABLE_FOLDER_NAME = "PoppablePlants"
 local FIELDS_FOLDER_NAME = "Fields"
@@ -89,6 +95,49 @@ listLayout.Padding = UDim.new(0, 2)
 listLayout.FillDirection = Enum.FillDirection.Vertical
 listLayout.SortOrder = Enum.SortOrder.LayoutOrder
 listLayout.Parent = listFrame
+
+-- ========== DISCORD ==========
+local lastDiscordReport = 0
+
+local function sendDiscordReport()
+    if not DISCORD_ENABLED or not DISCORD_WEBHOOK_URL then return end
+
+    local currentTime = tick()
+    if currentTime - lastDiscordReport < DISCORD_REPORT_INTERVAL then return end
+    lastDiscordReport = currentTime
+
+    local activeCount = 0
+    for _ in pairs(activeBlooms) do activeCount = activeCount + 1 end
+
+    local embed = {
+        title = "🌸 Bloom Tracker Report",
+        description = "1-Minute Statistics Update",
+        fields = {
+            {name = "Total Spawned", value = tostring(bloomStats.total_spawned), inline = true},
+            {name = "Currently Active", value = tostring(activeCount), inline = true},
+            {name = "Total Destroyed", value = tostring(bloomStats.total_destroyed), inline = true},
+            {name = "Assigned to Field", value = tostring(bloomStats.field_assignments), inline = true},
+            {name = "No Field Found", value = tostring(bloomStats.no_field_assigned), inline = true},
+            {name = "Timestamp", value = os.date("%Y-%m-%d %H:%M:%S"), inline = false}
+        },
+        color = 3447003
+    }
+
+    local payload = {
+        embeds = {embed},
+        username = "🌸 Bloom Tracker"
+    }
+
+    local success, err = pcall(function()
+        HttpService:PostAsync(DISCORD_WEBHOOK_URL, HttpService:JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
+    end)
+
+    if success then
+        print("[BloomTracker] ✓ Discord report sent")
+    else
+        print("[BloomTracker] ✗ Discord error: " .. tostring(err))
+    end
+end
 
 -- ========== FUNCTIONS ==========
 local function getFieldsFolder()
@@ -288,6 +337,10 @@ if poppable then
         if isBloomCandidate(desc) then trackBloom(desc) end
     end
     poppable.DescendantAdded:Connect(onDescendantAdded)
-    RunService.Heartbeat:Connect(updateBloomPositions)
+    RunService.Heartbeat:Connect(function()
+        updateBloomPositions()
+        sendDiscordReport()
+    end)
     updateUIStats()
+    print("[BloomTracker] ✓ Initialized with Discord webhooks")
 end
