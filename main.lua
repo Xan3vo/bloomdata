@@ -102,6 +102,8 @@ listLayout.Parent = listFrame
 -- ========== DISCORD ==========
 local lastDiscordReport = 0
 
+local recentBlooms = {} -- Track recent bloom events
+
 local function sendDiscordReport()
     if not DISCORD_ENABLED or not DISCORD_WEBHOOK_URL then return end
 
@@ -110,25 +112,45 @@ local function sendDiscordReport()
     lastDiscordReport = currentTime
 
     local activeCount = 0
-    for _ in pairs(activeBlooms) do activeCount = activeCount + 1 end
+    local fieldBlooms = 0
+    local noFieldBlooms = 0
 
-    local embed = {
-        title = "🌸 Bloom Tracker Report",
-        description = "1-Minute Statistics Update",
+    for bloom, data in pairs(activeBlooms) do
+        activeCount = activeCount + 1
+        if data.lastFieldName then
+            fieldBlooms = fieldBlooms + 1
+        else
+            noFieldBlooms = noFieldBlooms + 1
+        end
+    end
+
+    -- Calculate stats
+    local destroyRate = bloomStats.total_spawned > 0 and math.floor((bloomStats.total_destroyed / bloomStats.total_spawned) * 100) or 0
+    local assignmentRate = bloomStats.total_spawned > 0 and math.floor((bloomStats.field_assignments / bloomStats.total_spawned) * 100) or 0
+
+    -- Build nice embeds
+    local statsEmbed = {
+        title = "📊 Bloom Tracker - 1 Minute Report",
+        description = "Real-time bloom statistics and field tracking",
+        color = 0x00ff00, -- Green
         fields = {
-            {name = "Total Spawned", value = tostring(bloomStats.total_spawned), inline = true},
-            {name = "Currently Active", value = tostring(activeCount), inline = true},
-            {name = "Total Destroyed", value = tostring(bloomStats.total_destroyed), inline = true},
-            {name = "Assigned to Field", value = tostring(bloomStats.field_assignments), inline = true},
-            {name = "No Field Found", value = tostring(bloomStats.no_field_assigned), inline = true},
-            {name = "Timestamp", value = os.date("%Y-%m-%d %H:%M:%S"), inline = false}
+            {name = "📈 Spawn Statistics", value = "```\nTotal Spawned: " .. bloomStats.total_spawned .. "\nTotal Destroyed: " .. bloomStats.total_destroyed .. "\nDestruction Rate: " .. destroyRate .. "%\n```", inline = false},
+            {name = "🌸 Current Status", value = "```\nActive Blooms: " .. activeCount .. "\nIn Fields: " .. fieldBlooms .. "\nNo Field: " .. noFieldBlooms .. "\n```", inline = false},
+            {name = "🎯 Field Assignment", value = "```\nSuccessfully Assigned: " .. bloomStats.field_assignments .. "\nAssignment Rate: " .. assignmentRate .. "%\nMissing Field: " .. bloomStats.no_field_assigned .. "\n```", inline = false},
+            {name = "⏰ Timestamp", value = "```\n" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n```", inline = false}
         },
-        color = 3447003
+        thumbnail = {
+            url = "https://www.roblox.com/avatar-thumbnails?username=Bloom&x=150&y=150&format=Png"
+        },
+        footer = {
+            text = "Bloom Tracker v1.0 | Next report in 60 seconds"
+        }
     }
 
     local payload = {
-        embeds = {embed},
-        username = "🌸 Bloom Tracker"
+        embeds = {statsEmbed},
+        username = "🌸 Bloom Tracker Bot",
+        avatar_url = "https://www.roblox.com/avatar-thumbnails?username=Bloom&x=150&y=150&format=Png"
     }
 
     local success, err = pcall(function()
@@ -136,7 +158,7 @@ local function sendDiscordReport()
     end)
 
     if success then
-        print("[BloomTracker] ✓ Discord report sent")
+        print("[BloomTracker] ✓ Discord report sent - Active: " .. activeCount .. " | Spawned: " .. bloomStats.total_spawned .. " | Destroyed: " .. bloomStats.total_destroyed)
     else
         print("[BloomTracker] ✗ Discord error: " .. tostring(err))
     end
