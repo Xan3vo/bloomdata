@@ -22,7 +22,7 @@ local bloomStats = {total_spawned = 0, total_destroyed = 0, field_assignments = 
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "BloomTrackerGui"
 screenGui.ResetOnSpawn = false
-screenGui.ZIndex = 100
+screenGui.DisplayOrder = 100
 screenGui.Parent = playerGui
 
 local mainFrame = Instance.new("Frame")
