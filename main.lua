@@ -93,9 +93,20 @@ listLayout.Parent = listFrame
 -- ========== FUNCTIONS ==========
 local function getFieldsFolder()
     local f = Workspace:FindFirstChild(FIELDS_FOLDER_NAME) or Workspace:FindFirstChild("FlowerZones")
-    if f then return f end
+    if f then
+        print("[BloomTracker] Found Fields folder: " .. f:GetFullName())
+        return f
+    end
     for _, v in ipairs(Workspace:GetDescendants()) do
-        if (v.Name == FIELDS_FOLDER_NAME or v.Name == "FlowerZones") and (v:IsA("Folder") or v:IsA("Model")) then return v end
+        if (v.Name == FIELDS_FOLDER_NAME or v.Name == "FlowerZones") and (v:IsA("Folder") or v:IsA("Model")) then
+            print("[BloomTracker] Found Fields at: " .. v:GetFullName())
+            return v
+        end
+    end
+    print("[BloomTracker] ERROR: Fields folder not found!")
+    print("[BloomTracker] Workspace contents:")
+    for _, child in ipairs(Workspace:GetChildren()) do
+        print("[BloomTracker]   - " .. child.Name .. " (" .. child.ClassName .. ")")
     end
     return nil
 end
@@ -127,19 +138,23 @@ local function cacheFieldData()
     local fieldsFolder = getFieldsFolder()
     if not fieldsFolder then return end
 
+    print("[BloomTracker] Caching fields...")
     for _, field in ipairs(fieldsFolder:GetChildren()) do
         if field:IsA("Model") then
             local ok, boxCFrame, size = pcall(function() return field:GetBoundingBox() end)
             if ok and boxCFrame and size then
                 fieldCache[field.Name] = {field = field, boxCFrame = boxCFrame, size = size, useBoundingBox = true}
+                print("[BloomTracker] ✓ Cached field '" .. field.Name .. "' (bounding box)")
             else
                 local pivotPos = field.PrimaryPart and field.PrimaryPart.Position or (pcall(function() return field:GetPivot() end) and field:GetPivot().Position or nil)
                 if pivotPos then
                     fieldCache[field.Name] = {field = field, position = pivotPos, radius = 50, useBoundingBox = false}
+                    print("[BloomTracker] ✓ Cached field '" .. field.Name .. "' at " .. tostring(pivotPos))
                 end
             end
         end
     end
+    print("[BloomTracker] Total fields cached: " .. tostring(#fieldCache))
 end
 
 local function getFieldForPosition(pos)
@@ -198,8 +213,13 @@ local function trackBloom(bloom)
 
     if field then
         bloomStats.field_assignments = bloomStats.field_assignments + 1
+        print("[BloomTracker] ✓ Bloom '" .. bloom.Name .. "' assigned to field '" .. field.Name .. "' at position " .. tostring(pos))
     else
         bloomStats.no_field_assigned = bloomStats.no_field_assigned + 1
+        local fieldNames = ""
+        for name, _ in pairs(fieldCache) do fieldNames = fieldNames .. (fieldNames == "" and name or ", " .. name) end
+        print("[BloomTracker] ✗ Bloom '" .. bloom.Name .. "' at position " .. tostring(pos) .. " - NO FIELD MATCH")
+        print("[BloomTracker]   Available fields: " .. (fieldNames ~= "" and fieldNames or "NONE"))
     end
 
     local uiLabel = createBloomLabel(bloom, field)
