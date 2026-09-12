@@ -6,10 +6,13 @@ local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
--- Discord Webhook Configuration (requires server-side HttpService)
+-- Discord Webhook Configuration
 local DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1548446623300849736/pyVshktLNmolGJt5eR1MyyqwUunDGcvRM5G53CNOJKLqo9_a7Wl7KbnQ4-aXSX8sm_Sf"
-local DISCORD_ENABLED = false -- Disabled for client-side (LocalScript limitation)
+local DISCORD_ENABLED = true
 local DISCORD_REPORT_INTERVAL = 60
+
+-- Enable HTTP for executor
+pcall(function() HttpService:SetHttpEnabled(true) end)
 
 local POPPABLE_FOLDER_NAME = "PoppablePlants"
 local FIELDS_FOLDER_NAME = "Fields"
