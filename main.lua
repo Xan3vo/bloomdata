@@ -11,7 +11,10 @@ local UserInputService = game:GetService("UserInputService")
 -- ===================== CONFIG =====================
 local DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1548446623300849736/pyVshktLNmolGJt5eR1MyyqwUunDGcvRM5G53CNOJKLqo9_a7Wl7KbnQ4-aXSX8sm_Sf"
 local DISCORD_ENABLED = true
-local DISCORD_REPORT_INTERVAL = 60
+local INTERVAL_OPTIONS = {30, 60, 300, 600} -- 30s, 1m, 5m, 10m
+local intervalIndex = 2 -- defaults to 60s
+local DISCORD_MAX_RETRIES = 4
+local DISCORD_RETRY_BASE_DELAY = 2 -- seconds, doubles each retry
 
 local POPPABLE_FOLDER_NAME = "PoppablePlants"
 local FIELDS_FOLDER_NAME = "Fields"
@@ -37,6 +40,21 @@ local lastDiscordReport = 0
 local startTime = os.time()
 local bloomStats = {total_spawned = 0, total_destroyed = 0, field_assignments = 0, no_field_assigned = 0}
 local searchFilter = ""
+
+-- Forward declarations (assigned later; referenced by UI callbacks created earlier in the file)
+local sendDiscordReport
+local refreshStatusLabel
+
+-- Discord delivery state
+local discordState = {
+    lastSuccessTime = nil,
+    lastFailTime = nil,
+    consecutiveFailures = 0,
+    totalSent = 0,
+    totalFailed = 0,
+    sending = false,
+    queue = {}, -- undelivered payloads waiting to be retried/flushed
+}
 
 -- ===================== UTIL =====================
 local function tween(obj, props, time, style)
@@ -73,13 +91,13 @@ shadow.ImageColor3 = Color3.new(0, 0, 0)
 shadow.ImageTransparency = 0.45
 shadow.ScaleType = Enum.ScaleType.Slice
 shadow.SliceCenter = Rect.new(10, 10, 118, 118)
-shadow.Size = UDim2.new(0, 420, 0, 480)
+shadow.Size = UDim2.new(0, 420, 0, 532)
 shadow.Position = UDim2.new(0, 4, 0, 4)
 shadow.ZIndex = 0
 
 local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, 400, 0, 470)
+mainFrame.Size = UDim2.new(0, 400, 0, 522)
 mainFrame.Position = UDim2.new(0, 20, 0, 20)
 mainFrame.BackgroundColor3 = Color3.fromRGB(22, 24, 28)
 mainFrame.BorderSizePixel = 0
@@ -186,7 +204,7 @@ closeBtn.MouseButton1Click:Connect(function()
 end)
 
 local minimized = false
-local expandedSize = UDim2.new(0, 400, 0, 470)
+local expandedSize = UDim2.new(0, 400, 0, 522)
 minimizeBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     tween(mainFrame, {Size = minimized and UDim2.new(0, 400, 0, 44) or expandedSize}, 0.25):Play()
@@ -304,11 +322,134 @@ searchBox.ClearTextOnFocus = false
 searchBox.ZIndex = 3
 searchBox.Parent = searchBar
 
+-- ===== Discord control bar =====
+local discordBar = Instance.new("Frame")
+discordBar.Size = UDim2.new(1, -20, 0, 52)
+discordBar.Position = UDim2.new(0, 10, 0, 168)
+discordBar.BackgroundColor3 = Color3.fromRGB(32, 36, 40)
+discordBar.ZIndex = 2
+discordBar.Parent = mainFrame
+Instance.new("UICorner", discordBar).CornerRadius = UDim.new(0, 8)
+
+local discordIcon = Instance.new("TextLabel")
+discordIcon.BackgroundTransparency = 1
+discordIcon.Size = UDim2.new(0, 26, 0, 26)
+discordIcon.Position = UDim2.new(0, 8, 0, 6)
+discordIcon.Text = "💬"
+discordIcon.TextSize = 14
+discordIcon.ZIndex = 3
+discordIcon.Parent = discordBar
+
+-- Toggle switch
+local toggleTrack = Instance.new("Frame")
+toggleTrack.Size = UDim2.new(0, 38, 0, 20)
+toggleTrack.Position = UDim2.new(0, 8, 0, 26)
+toggleTrack.BackgroundColor3 = Color3.fromRGB(90, 220, 130)
+toggleTrack.ZIndex = 3
+toggleTrack.Parent = discordBar
+Instance.new("UICorner", toggleTrack).CornerRadius = UDim.new(1, 0)
+
+local toggleKnob = Instance.new("Frame")
+toggleKnob.Size = UDim2.new(0, 16, 0, 16)
+toggleKnob.Position = UDim2.new(1, -18, 0.5, -8)
+toggleKnob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+toggleKnob.ZIndex = 4
+toggleKnob.Parent = toggleTrack
+Instance.new("UICorner", toggleKnob).CornerRadius = UDim.new(1, 0)
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(1, 0, 1, 0)
+toggleBtn.BackgroundTransparency = 1
+toggleBtn.Text = ""
+toggleBtn.ZIndex = 5
+toggleBtn.Parent = toggleTrack
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.BackgroundTransparency = 1
+statusLabel.Size = UDim2.new(1, -110, 0, 16)
+statusLabel.Position = UDim2.new(0, 36, 0, 4)
+statusLabel.Text = "Discord Webhook"
+statusLabel.TextSize = 12
+statusLabel.Font = Enum.Font.GothamBold
+statusLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.ZIndex = 3
+statusLabel.Parent = discordBar
+
+local statusSubLabel = Instance.new("TextLabel")
+statusSubLabel.BackgroundTransparency = 1
+statusSubLabel.Size = UDim2.new(1, -110, 0, 16)
+statusSubLabel.Position = UDim2.new(0, 36, 0, 20)
+statusSubLabel.Text = "Never sent yet"
+statusSubLabel.TextSize = 10
+statusSubLabel.Font = Enum.Font.Gotham
+statusSubLabel.TextColor3 = Color3.fromRGB(150, 155, 160)
+statusSubLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusSubLabel.ZIndex = 3
+statusSubLabel.Parent = discordBar
+
+-- Interval buttons
+local intervalHolder = Instance.new("Frame")
+intervalHolder.Size = UDim2.new(0, 96, 0, 44)
+intervalHolder.Position = UDim2.new(1, -100, 0, 4)
+intervalHolder.BackgroundTransparency = 1
+intervalHolder.ZIndex = 3
+intervalHolder.Parent = discordBar
+
+local intervalGrid = Instance.new("UIGridLayout")
+intervalGrid.CellSize = UDim2.new(0.5, -2, 0.5, -2)
+intervalGrid.CellPadding = UDim2.new(0, 4, 0, 4)
+intervalGrid.Parent = intervalHolder
+
+local intervalLabels = {"30s", "1m", "5m", "10m"}
+local intervalButtons = {}
+for i, lbl in ipairs(intervalLabels) do
+    local btn = Instance.new("TextButton")
+    btn.BackgroundColor3 = i == intervalIndex and Color3.fromRGB(90, 200, 120) or Color3.fromRGB(45, 50, 55)
+    btn.Text = lbl
+    btn.TextSize = 10
+    btn.Font = Enum.Font.GothamBold
+    btn.TextColor3 = i == intervalIndex and Color3.fromRGB(15, 30, 20) or Color3.fromRGB(200, 200, 205)
+    btn.ZIndex = 4
+    btn.AutoButtonColor = true
+    btn.Parent = intervalHolder
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 4)
+    intervalButtons[i] = btn
+
+    btn.MouseButton1Click:Connect(function()
+        intervalIndex = i
+        for j, b in ipairs(intervalButtons) do
+            local sel = j == intervalIndex
+            tween(b, {BackgroundColor3 = sel and Color3.fromRGB(90, 200, 120) or Color3.fromRGB(45, 50, 55)}, 0.15):Play()
+            b.TextColor3 = sel and Color3.fromRGB(15, 30, 20) or Color3.fromRGB(200, 200, 205)
+        end
+        lastDiscordReport = 0 -- send immediately on interval change so you see it take effect
+        print("[BloomTracker] Discord interval set to " .. INTERVAL_OPTIONS[intervalIndex] .. "s")
+    end)
+end
+
+local function refreshDiscordToggleUI()
+    tween(toggleTrack, {BackgroundColor3 = DISCORD_ENABLED and Color3.fromRGB(90, 220, 130) or Color3.fromRGB(80, 84, 90)}, 0.15):Play()
+    tween(toggleKnob, {Position = DISCORD_ENABLED and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8)}, 0.15):Play()
+    for _, b in ipairs(intervalButtons) do b.AutoButtonColor = DISCORD_ENABLED end
+end
+
+toggleBtn.MouseButton1Click:Connect(function()
+    DISCORD_ENABLED = not DISCORD_ENABLED
+    refreshDiscordToggleUI()
+    print("[BloomTracker] Discord webhook " .. (DISCORD_ENABLED and "ENABLED" or "DISABLED"))
+    if DISCORD_ENABLED then
+        lastDiscordReport = 0
+        sendDiscordReport(true)
+    end
+    refreshStatusLabel()
+end)
+
 -- ===== Bloom list =====
 local listFrame = Instance.new("ScrollingFrame")
 listFrame.Name = "BloomListFrame"
-listFrame.Size = UDim2.new(1, -20, 1, -172)
-listFrame.Position = UDim2.new(0, 10, 0, 170)
+listFrame.Size = UDim2.new(1, -20, 1, -226)
+listFrame.Position = UDim2.new(0, 10, 0, 224)
 listFrame.BackgroundColor3 = Color3.fromRGB(28, 30, 34)
 listFrame.BorderSizePixel = 0
 listFrame.ScrollBarThickness = 5
@@ -559,12 +700,30 @@ local function buildFieldBreakdownText()
     return table.concat(lines, "\n")
 end
 
-local function sendDiscordReport()
-    if not DISCORD_ENABLED or not DISCORD_WEBHOOK_URL then return end
-    local currentTime = tick()
-    if currentTime - lastDiscordReport < DISCORD_REPORT_INTERVAL then return end
-    lastDiscordReport = currentTime
+refreshStatusLabel = function()
+    if DISCORD_ENABLED then
+        statusLabel.Text = "Discord Webhook"
+    else
+        statusLabel.Text = "Discord Webhook (off)"
+    end
 
+    if discordState.sending then
+        statusSubLabel.Text = "Sending..."
+        statusSubLabel.TextColor3 = Color3.fromRGB(255, 210, 90)
+    elseif discordState.consecutiveFailures > 0 then
+        statusSubLabel.Text = string.format("✗ Failed x%d — retrying", discordState.consecutiveFailures)
+        statusSubLabel.TextColor3 = Color3.fromRGB(255, 120, 120)
+    elseif discordState.lastSuccessTime then
+        local ago = math.floor(os.time() - discordState.lastSuccessTime)
+        statusSubLabel.Text = string.format("✓ Last sent %ds ago (%d total)", ago, discordState.totalSent)
+        statusSubLabel.TextColor3 = Color3.fromRGB(120, 220, 150)
+    else
+        statusSubLabel.Text = "Never sent yet"
+        statusSubLabel.TextColor3 = Color3.fromRGB(150, 155, 160)
+    end
+end
+
+local function buildReportPayload()
     local active, fieldBlooms, noFieldBlooms = 0, 0, 0
     for _, data in pairs(activeBlooms) do
         active = active + 1
@@ -574,38 +733,101 @@ local function sendDiscordReport()
     local destroyRate = bloomStats.total_spawned > 0 and math.floor((bloomStats.total_destroyed / bloomStats.total_spawned) * 100) or 0
     local assignRate = bloomStats.total_spawned > 0 and math.floor((bloomStats.field_assignments / bloomStats.total_spawned) * 100) or 0
     local uptime = fmtDuration(os.time() - startTime)
+    local currentInterval = INTERVAL_OPTIONS[intervalIndex]
 
     local barLength = 20
     local filled = math.floor((assignRate / 100) * barLength)
     local bar = string.rep("█", filled) .. string.rep("░", barLength - filled)
 
+    local reliabilityNote = discordState.consecutiveFailures > 0
+        and string.format("⚠️ %d delivery failure(s) recovered before this report", discordState.consecutiveFailures)
+        or "✓ Delivering normally"
+
     local embed = {
         title = "🌸 Bloom Tracker — Live Report",
-        description = string.format("```\n%s  %d%%\n```\n**Session uptime:** `%s`", bar, assignRate, uptime),
+        description = string.format("```\n%s  %d%%\n```\n**Session uptime:** `%s`   •   %s", bar, assignRate, uptime, reliabilityNote),
         color = fieldBlooms >= noFieldBlooms and 0x57F287 or 0xFEE75C,
         fields = {
             { name = "📈 Totals", value = string.format("```yaml\nSpawned:   %d\nDestroyed: %d\nPop Rate:  %d%%\n```", bloomStats.total_spawned, bloomStats.total_destroyed, destroyRate), inline = true },
             { name = "🌿 Live Status", value = string.format("```yaml\nActive:    %d\nIn Field:  %d\nNo Field:  %d\n```", active, fieldBlooms, noFieldBlooms), inline = true },
             { name = "🗺️ Field Breakdown (top 10)", value = "```\n" .. buildFieldBreakdownText() .. "\n```", inline = false },
         },
-        footer = { text = "Bloom Tracker v2.0 • next report in " .. DISCORD_REPORT_INTERVAL .. "s" },
+        footer = { text = string.format("Bloom Tracker v2.0 • report #%d • every %ds", discordState.totalSent + 1, currentInterval) },
         timestamp = DateTime.now():ToIsoDate(),
     }
 
-    local payload = {
+    return {
         embeds = { embed },
         username = "Bloom Tracker",
     }
+end
 
-    local success, err = pcall(function()
-        HttpService:PostAsync(DISCORD_WEBHOOK_URL, HttpService:JSONEncode(payload), Enum.HttpContentType.ApplicationJson)
+-- Sends one payload with automatic retry + exponential backoff.
+-- Returns true/false via callback so the caller knows the final outcome.
+local function sendToDiscordWithRetry(payload, onDone)
+    task.spawn(function()
+        local attempt = 0
+        local delaySec = DISCORD_RETRY_BASE_DELAY
+        local encoded = HttpService:JSONEncode(payload)
+
+        while attempt <= DISCORD_MAX_RETRIES do
+            attempt = attempt + 1
+            local success, errOrResult = pcall(function()
+                HttpService:PostAsync(DISCORD_WEBHOOK_URL, encoded, Enum.HttpContentType.ApplicationJson)
+            end)
+
+            if success then
+                if onDone then onDone(true, attempt) end
+                return
+            end
+
+            warn(string.format("[BloomTracker] Discord send attempt %d/%d failed: %s", attempt, DISCORD_MAX_RETRIES + 1, tostring(errOrResult)))
+
+            if attempt <= DISCORD_MAX_RETRIES then
+                task.wait(delaySec)
+                delaySec = math.min(delaySec * 2, 30)
+            end
+        end
+
+        if onDone then onDone(false, attempt) end
     end)
+end
 
-    if success then
-        print(string.format("[BloomTracker] ✓ Discord report sent — Active %d | Spawned %d | Destroyed %d", active, bloomStats.total_spawned, bloomStats.total_destroyed))
-    else
-        warn("[BloomTracker] ✗ Discord error: " .. tostring(err))
+sendDiscordReport = function(forceNow)
+    if not DISCORD_ENABLED or not DISCORD_WEBHOOK_URL or discordState.sending then return end
+
+    local currentTime = tick()
+    local interval = INTERVAL_OPTIONS[intervalIndex]
+    if not forceNow and currentTime - lastDiscordReport < interval then return end
+    lastDiscordReport = currentTime
+
+    discordState.sending = true
+    refreshStatusLabel()
+
+    local active, fieldBlooms = 0, 0
+    for _, data in pairs(activeBlooms) do
+        active = active + 1
+        if data.lastFieldName then fieldBlooms = fieldBlooms + 1 end
     end
+
+    local payload = buildReportPayload()
+
+    sendToDiscordWithRetry(payload, function(success, attempts)
+        discordState.sending = false
+        if success then
+            discordState.lastSuccessTime = os.time()
+            discordState.consecutiveFailures = 0
+            discordState.totalSent = discordState.totalSent + 1
+            print(string.format("[BloomTracker] ✓ Discord report sent (attempt %d) — Active %d | Spawned %d | Destroyed %d",
+                attempts, active, bloomStats.total_spawned, bloomStats.total_destroyed))
+        else
+            discordState.lastFailTime = os.time()
+            discordState.consecutiveFailures = discordState.consecutiveFailures + 1
+            discordState.totalFailed = discordState.totalFailed + 1
+            warn(string.format("[BloomTracker] ✗ Discord report FAILED after %d attempts — data still tracked locally, will retry next interval", attempts))
+        end
+        refreshStatusLabel()
+    end)
 end
 
 -- ===================== BLOOM TRACKING =====================
@@ -710,13 +932,27 @@ local function init()
     end
 
     poppable.DescendantAdded:Connect(onDescendantAdded)
+
+    local lastStatusRefresh = 0
     RunService.Heartbeat:Connect(function()
         updateBloomPositions()
         sendDiscordReport()
+
+        local now = tick()
+        if now - lastStatusRefresh >= 1 then -- refresh "Xs ago" text once a second
+            lastStatusRefresh = now
+            refreshStatusLabel()
+        end
     end)
 
+    refreshDiscordToggleUI()
+    refreshStatusLabel()
     updateUIStats()
     print("[BloomTracker] ✓ v2.0 initialized — tracking " .. tostring(#fieldParts) .. " fields")
+
+    if DISCORD_ENABLED then
+        task.delay(2, function() sendDiscordReport(true) end) -- fire an immediate confirmation report on startup
+    end
 end
 
 -- Intro animation
