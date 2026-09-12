@@ -18,6 +18,7 @@ local POPPABLE_FOLDER_NAME = "PoppablePlants"
 local FIELDS_FOLDER_NAME = "Fields"
 local POSITION_CHECK_THRESHOLD = 2
 local CHECK_INTERVAL = 0.5
+local FIELD_DETECTION_RADIUS = 100 -- Larger radius for better detection
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -38,10 +39,30 @@ local mainFrame = Instance.new("Frame")
 mainFrame.Name = "MainFrame"
 mainFrame.Size = UDim2.new(0, 400, 0, 600)
 mainFrame.Position = UDim2.new(0, 20, 0, 20)
-mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-mainFrame.BorderColor3 = Color3.fromRGB(100, 200, 100)
-mainFrame.BorderSizePixel = 2
+mainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+mainFrame.BorderSizePixel = 0
 mainFrame.Parent = screenGui
+
+-- Add shadow effect
+local shadow = Instance.new("Frame")
+shadow.Size = UDim2.new(1, 8, 1, 8)
+shadow.Position = UDim2.new(0, -4, 0, -4)
+shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+shadow.BorderSizePixel = 0
+shadow.ZIndex = -1
+shadow.Parent = mainFrame
+
+-- Add rounded corner effect with border
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 8)
+corner.Parent = mainFrame
+
+local borderFrame = Instance.new("Frame")
+borderFrame.Size = UDim2.new(1, 0, 1, 0)
+borderFrame.BackgroundTransparency = 1
+borderFrame.BorderSizePixel = 2
+borderFrame.BorderColor3 = Color3.fromRGB(100, 200, 100)
+borderFrame.Parent = mainFrame
 
 local titleLabel = Instance.new("TextLabel")
 titleLabel.Name = "Title"
@@ -252,7 +273,7 @@ local function getFieldForPosition(pos)
 
     for _, data in pairs(fieldCache) do
         if not data.useBoundingBox and data.position then
-            if (pos - data.position).Magnitude < (data.radius or 50) then return data.field end
+            if (pos - data.position).Magnitude < FIELD_DETECTION_RADIUS then return data.field end
         end
     end
 
@@ -262,15 +283,23 @@ end
 local function createBloomLabel(bloom, field)
     local label = Instance.new("TextLabel")
     label.Name = bloom.Name
-    label.Size = UDim2.new(1, 0, 0, 30)
-    label.BackgroundColor3 = Color3.fromRGB(50, 50, 55)
-    label.BorderColor3 = field and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(255, 200, 100)
-    label.BorderSizePixel = 1
-    label.Text = ("  %s → %s"):format(bloom.Name, field and field.Name or "NO FIELD")
-    label.TextSize = 11
-    label.TextColor3 = Color3.fromRGB(220, 220, 220)
-    label.Font = Enum.Font.Gotham
+    label.Size = UDim2.new(1, -6, 0, 32)
+    label.BackgroundColor3 = field and Color3.fromRGB(45, 65, 45) or Color3.fromRGB(65, 55, 35)
+    label.BorderSizePixel = 0
+    label.Text = ("  %s %s"):format(field and "✓" or "✗", field and field.Name or "NO FIELD")
+    label.TextSize = 12
+    label.TextColor3 = field and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 200, 100)
+    label.Font = Enum.Font.GothamMedium
     label.TextXAlignment = Enum.TextXAlignment.Left
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = label
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 6)
+    padding.Parent = label
+
     label.Parent = listFrame
     return label
 end
@@ -343,8 +372,9 @@ local function updateBloomPositions()
                 local newFieldName = newField and newField.Name or nil
                 if data.lastFieldName ~= newFieldName then
                     data.lastFieldName = newFieldName
-                    data.uiLabel.BorderColor3 = newField and Color3.fromRGB(100, 200, 100) or Color3.fromRGB(255, 200, 100)
-                    data.uiLabel.Text = ("  %s → %s"):format(bloom.Name, newField and newField.Name or "NO FIELD")
+                    data.uiLabel.BackgroundColor3 = newField and Color3.fromRGB(45, 65, 45) or Color3.fromRGB(65, 55, 35)
+                    data.uiLabel.TextColor3 = newField and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 200, 100)
+                    data.uiLabel.Text = ("  %s %s"):format(newField and "✓" or "✗", newField and newField.Name or "NO FIELD")
                 end
                 data.lastPos = newPos
             end
